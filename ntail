@@ -1,0 +1,468 @@
+#!/bin/sh
+# -*- python -*-
+""":"
+exec python $0 ${1+"$@"}
+"""
+
+import argparse
+import curses
+import curses.panel
+import datetime
+import json
+import re
+import signal
+import sys
+import textwrap
+import time
+
+from threading import Lock
+from threading import Thread
+
+from Details import *
+from Globals import *
+from Minihelp import *
+from Popup import *
+from Tail import *
+from Win import *
+
+def signal_handler(sig, frame):
+    curses.endwin()
+    sys.exit(0)
+
+def parse_placement(p):
+    m = re.search(r'(\d+)[xX](\d+)\+(\d+)\+(\d+)', p)
+    if m:
+        return int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+    m = re.search(r'(\d+)[xX](\d+)', p)
+    if m:
+        return int(m.group(1)), int(m.group(2)), 0, 0
+    raise Exception("Invalid placement format")
+
+
+help_msg = """
+    F1          - This help message,
+    F2/Enter    - Enter "details" window
+                  Popup window with the full contents
+                  of the curently selected window
+    F5          - Reread selected window content
+    F10/q/x     - Exit,
+    Tab / Right - Select next window,
+    Left        - select previous window,
+
+    Navigation in "details" window (popup window
+    with the full content of the watched file)
+      q / x / F10    - Exit from "details" window
+      F5             - Reread "details" window
+      g              - goto line
+      up/down        - Up/Down one line,
+      PgUp/PgDown    - Up/Down one page,
+      End            - Goto last entry in a window,
+      Home           - Goto first entry in a window,
+"""
+minihelp_msg = ' F1 - help,   Enter - selected window,   F10 or q - exit '
+
+help_prolog = """     Simultaneous multitail tool.
+The tool is wathing a few files (like "tail -f") simultaneously each file
+in its own ncurses based window and shows its last lines.
+
+In an addition the selected file may be presented in "details" popup window
+while the basic navigation (Up/Down/PgUp/PgDown, etc.) is available in the window.
+
+The configuraion of the files, windows, etc. can be specified in a json file (-conf option)
+or in a command line using -grid and -win options. See Examples/conf.json file for detailed
+option description. Note that all the option configured in the json file may be specified
+in a command line. If a json configuration file is specified ntail tools doesn't accept
+another configuration (via -win/-grid flags).
+"""
+help_epilog = """
+Examples:
+    ./ntail -conf Examples/conf1.json
+        or
+    ./ntail -grid 10x10 -win "4x10+0+0:Numbers.txt:Numbers title" 6x5+4+0:Examples/Numbers.sh 6x5+4+5:Win.py
+        or
+    ./ntail -grid 10x10 -refr 1 -n -details 6x8+3+2 -win "4x10+0+0:Numbers.txt:Numbers title" 6x5+4+0:Examples/Numbers.sh 6x5+4+5:Win.py
+        Note: run "./Examples/Numbers.sh >> Numbers.txt" in parralel with a last command
+              in another window in order to see dynamic window refreshing
+"""
+REFR_TMO_DEF = 5
+ap = argparse.ArgumentParser(description=help_prolog,
+                             formatter_class=argparse.RawTextHelpFormatter,
+                             epilog=help_epilog)
+ap.add_argument('-grid',     nargs=1,   type=str, default='',   help='Grid definition (WxH format)')
+ap.add_argument('-win',      nargs='*', type=str, default='',   help='Windows')
+ap.add_argument('-details',  nargs=1,   type=str, default='',   help='"details" window placement')
+ap.add_argument('-conf',     nargs=1,   type=str, default='',   help='Config file')
+ap.add_argument('-refr_tmo', nargs=1,   type=int, default=REFR_TMO_DEF,    help="Delay between autorefresh (seconds). 0 - No auto refreshes")
+ap.add_argument('-n',        action='store_true', default=False, help='Do not show line numbers')
+args = ap.parse_args(sys.argv[1:])
+
+refr_delay = args.refr_tmo[0] if type(args.refr_tmo) == list else args.refr_tmo
+conf_file_mode = False
+conf_file = ''
+grid = ''
+windows = []
+show_numbers = not args.n
+
+if len(sys.argv) < 2:
+    ap.print_help(sys.stderr)
+    sys.exit(1)
+
+if args.conf != '':
+    # Config file is defined
+    conf_file_mode = True
+    conf_file = args.conf[0]
+
+    for m in ('grid', 'win', 'details'):
+        v = eval('args.' + m)
+        if v != '':
+            print('"-{}" and "-conf" are mutually exclusive options'.format(m))
+            os._exit(1)
+    if args.n:
+        print('"-n" and "-conf" are mutually exclusive options')
+        os._exit(1)
+    if refr_delay != REFR_TMO_DEF:
+        print('"-refr_tmo" and "-conf" are mutually exclusive options')
+        os._exit(1)
+else:
+    # Grid and at least one window should be defined
+    conf_file_mode = False
+    if args.grid == '':
+        print("-grid is mandatory if -conf is not sepcified")
+        os._exit(1)
+    if args.win == '':
+        print("at least one -win is mandatory if -conf is not specified")
+        os._exit(1)
+    grid = args.grid[0]
+    windows = args.win
+
+if conf_file_mode:
+    # JSON customized read here in order
+    # to emulate comments in json file (in a # ... form)
+    as_json =""
+    with open(conf_file) as f:
+        for line in f:
+            l = line.strip()
+            if len(l) < 1:
+                continue
+            m = re.match(r'^([^#]*)\s*#.*$', l)
+            if m:
+                l1 = m.group(1).strip()
+                if len(l1) > 0:
+                    as_json += l1
+            else:
+                as_json += l
+
+    conf = json.loads(as_json)
+    if type(conf) != dict:
+        print('Configuration file should be a dict on the high level')
+        sys.exit(0)
+
+# Init curses
+signal.signal(signal.SIGINT, signal_handler)
+screen = curses.initscr()
+USABLE_LINES   = curses.LINES - 1
+DRAWABLE_LINES = curses.LINES - TOP_BW - TOP_BW
+USABLE_COLS    = curses.COLS
+DRAWABLE_COLS  = curses.COLS - LEFT_BW - RIGHT_BW
+
+details_h = DRAWABLE_LINES - VERT_MARGIN
+details_w = DRAWABLE_COLS - HORIZONT_MARGIN
+details_x = HORIZONT_MARGIN // 2
+details_y = VERT_MARGIN // 2
+if conf_file_mode:
+    # ----------------------
+    # Configuration file mode
+    # ----------------------
+
+    # Grid
+    try:
+        vwidth, vheight, unused1, unused2 = parse_placement(conf['grid'])
+    except Exception as e:
+        print("\nCan't parse config: {}\n".format(str(e)))
+        os._exit(1)
+    x_scale = float(DRAWABLE_COLS) / float(vwidth)
+    y_scale = float(DRAWABLE_LINES) / float(vheight)
+
+    # Windows
+    win_mandatory = ('pos', 'file')
+    winlist = conf['windows']
+    if type(winlist) != list:
+        print('"windows" in configuration should be a list')
+        sys.exit(0)
+
+    for win in winlist:
+        for m in win_mandatory:
+            if m not in win:
+                print('The {} parameter is mandatory in widnows definition'.format(m))
+                sys.exit(0)
+        if 'title' not in win:
+            win['title'] = win['file']
+
+    # Details
+    if 'details' in conf:
+        # Non default "details" placement
+        try:
+            details_w, details_h, details_x, details_y = parse_placement(conf['details'])
+        except Exception as e:
+            curses.endwin()
+            print("\r\n\r\n\r\nCan't parse config: {}\r\n".format(str(e)))
+            os._exit(1)
+        details_h = int((float(details_h) * y_scale) + 0.5)
+        details_w = int((float(details_w) * x_scale) + 0.5)
+        details_y = int((float(details_y) * y_scale) + 0.5)
+        details_x = int((float(details_x) * x_scale) + 0.5)
+
+    # Recalculate coordinates
+    for win in winlist:
+        try:
+            w, h, x, y = parse_placement(win['pos'])
+        except Exception as e:
+            curses.endwin()
+            print("\r\n\r\n\r\nCan't parse config: {}\r\n".format(str(e)))
+            os._exit(1)
+        win['height'] = int((float(h) * y_scale) + 0.5)
+        win['width']  = int((float(w) * x_scale) + 0.5)
+        win['y']      = int((float(y) * y_scale) + 0.5)
+        win['x']      = int((float(x) * x_scale) + 0.5)
+
+    # Other parameters
+    if 'refr_tmo' in conf:
+        refr_delay = int(conf['refr_tmo'])
+    for n in ('n', 'no_lines', 'no_line_numbers'):
+        if n in conf:
+            show_numbers = not bool(conf[n])
+
+else:
+    # -----------------
+    # Command line mode
+    # -----------------
+
+    # Grid
+    try:
+        vwidth, vheight, unused1, unused2 = parse_placement(grid)
+    except Exception as e:
+        curses.endwin()
+        print("Can't parse config: {}\n".format(str(e)))
+        os._exit(1)
+    x_scale = float(DRAWABLE_COLS) / float(vwidth)
+    y_scale = float(DRAWABLE_LINES) / float(vheight)
+
+    # Details
+    if args.details != '':
+        try:
+            details_w, details_h, details_x, details_y = parse_placement(args.details[0])
+        except Exception as e:
+            curses.endwin()
+            print("\r\n\r\n\r\nCan't parse config: {}\r\n".format(str(e)))
+            os._exit(1)
+        details_h = int((float(details_h) * y_scale) + 0.5)
+        details_w = int((float(details_w) * x_scale) + 0.5)
+        details_y = int((float(details_y) * y_scale) + 0.5)
+        details_x = int((float(details_x) * x_scale) + 0.5)
+
+    # Windows
+    curses.endwin()
+    win_strs = args.win
+    winlist = []
+    for win_str in win_strs:
+        s = win_str.split(':')
+        if len(s) < 2 or len(s) > 3:
+            curses.endwin()
+            print("Windows must be in POSITION:FILE[:TITLE] format")
+            os._exit(1)
+
+        win = {}
+        try:
+            w, h, x, y = parse_placement(s[0])
+        except Exception as e:
+            curses.endwin()
+            print("\r\n\r\n\r\nCan't parse config: {}\r\n".format(str(e)))
+            os._exit(1)
+        win['file'] = s[1]
+        win['title'] = s[2] if len(s) > 2 else s[1]
+        win['height'] = int((float(h) * y_scale) + 0.5)
+        win['width']  = int((float(w) * x_scale) + 0.5)
+        win['y']      = int((float(y) * y_scale) + 0.5)
+        win['x']      = int((float(x) * x_scale) + 0.5)
+        winlist.append(win)
+
+curses.cbreak();
+curses.noecho();
+curses.raw();
+screen.keypad(True);
+screen.refresh();
+curses.start_color()
+curses.init_pair(FOCUS_COLOR,           curses.COLOR_RED,     curses.COLOR_BLACK)
+curses.init_pair(NO_FOCUS_COLOR,        curses.COLOR_CYAN,    curses.COLOR_BLACK)
+curses.init_pair(FOCUS_COLOR_R,         curses.COLOR_BLACK,   curses.COLOR_RED)
+curses.init_pair(NO_FOCUS_COLOR_R,      curses.COLOR_BLACK,   curses.COLOR_CYAN)
+curses.init_pair(TITLE_COLOR,           curses.COLOR_CYAN,    curses.COLOR_BLACK)
+curses.init_pair(REG_COLOR,             curses.COLOR_GREEN,   curses.COLOR_BLACK)
+curses.init_pair(BOT_COLOR,             curses.COLOR_YELLOW,  curses.COLOR_BLACK)
+curses.init_pair(LAST_TIME_COLOR1,      curses.COLOR_GREEN,   curses.COLOR_BLACK)
+curses.init_pair(LAST_TIME_COLOR2,      curses.COLOR_YELLOW,  curses.COLOR_BLACK)
+curses.init_pair(SPEC_COLOR,            curses.COLOR_WHITE, curses.COLOR_BLUE)
+curses.init_pair(NORM_COLOR,            curses.COLOR_WHITE,   curses.COLOR_BLACK)
+curses.init_pair(ERR_COLOR,             curses.COLOR_WHITE,   curses.COLOR_RED)
+curses.init_pair(HELP_COLOR,            curses.COLOR_GREEN,   curses.COLOR_BLACK)
+curses.init_pair(YESNO_SEL_COLOR,       curses.COLOR_BLACK,   curses.COLOR_CYAN)
+curses.init_pair(YESNO_NSEL_COLOR,      curses.COLOR_WHITE,   curses.COLOR_BLACK)
+curses.init_pair(DETAILS_BOX_COLOR,     curses.COLOR_GREEN,   curses.COLOR_BLACK)
+curses.init_pair(POPUP_BOX_COLOR,       curses.COLOR_YELLOW,  curses.COLOR_BLACK)
+curses.init_pair(LINE_NUMBERS_COLOR,    curses.COLOR_MAGENTA, curses.COLOR_BLACK)
+curses.init_pair(PROMPT_COLOR,          curses.COLOR_WHITE,   curses.COLOR_BLUE)
+curses.init_pair(INP_FIELD_COLOR,       curses.COLOR_BLACK,   curses.COLOR_YELLOW)
+
+# Create windows
+curs_lock = Lock()
+focus = True
+Wins = []
+for win in winlist:
+    w = Win(curs_lock, win['title'], win['height'], win['width'], win['x'], win['y'], win['file'], focus)
+    Wins.append(w)
+    focus = False
+minihelp = Minihelp(curs_lock, DRAWABLE_LINES, DRAWABLE_COLS, minihelp_msg)
+Win.windowslist = Wins
+
+class Refresh(Thread):
+    def __init__(self, tmo, inp):
+        self.tmo = tmo
+        self.inp = inp
+        Thread.__init__(self)
+
+    def start(self):
+        Thread.start(self)
+
+    def run(self):
+        global curs_lock
+
+        while True:
+            time.sleep(self.tmo)
+            self.inp.refresh()
+
+class InputLoop:
+    def __init__(self, curs_lock):
+        self.lock = curs_lock
+        self.dw = None
+        self.cur_w = 0
+        self.p = Popup(curs_lock)
+
+    def refresh(self):
+        for win in Wins:
+            win.refresh_lock()
+        minihelp.refresh_lock()
+        if self.dw:
+            self.dw.refresh()
+
+    def run(self):
+        global curs_lock
+
+        while True:
+            c = screen.getch()
+            if c == ord('q') or c == ord('x') or c == curses.KEY_F10:
+                # Exit
+                if self.dw:
+                    self.dw.hide()
+                    self.dw = None
+                else:
+                    r = self.p.yesno(screen, 'Exit confirmation', DRAWABLE_COLS, DRAWABLE_LINES, LEFT_BW, TOP_BW,
+                                     "\nDo you really want to exit ?", REG_COLOR, True)
+                    if r:
+                        break
+
+                self.refresh()
+
+            elif c == curses.KEY_F1 or c == ord('h'):
+                # Help
+                self.p.ok('Help', DRAWABLE_COLS, DRAWABLE_LINES, LEFT_BW, TOP_BW, help_msg, HELP_COLOR)
+
+                self.refresh()
+
+            elif c == curses.KEY_F2 or c == curses.KEY_ENTER or c == ord('\n'):
+                # Enter "details" window
+                if not self.dw:
+                    self.dw = Details(self.lock, Wins[self.cur_w].filename, details_h, details_w, details_x, details_y, show_numbers)
+                    self.dw.end()
+
+            elif c == ord('g'):
+                if self.dw:
+                    n, is_ok = self.p.get_int(screen, 'Line number', 'Goto line:', DRAWABLE_COLS, DRAWABLE_LINES, LEFT_BW, TOP_BW)
+                    if is_ok:
+                        self.dw.goto(n)
+                    self.refresh()
+
+            elif c == ord('\t'):
+                # Next window
+                if not self.dw:
+                    Wins[self.cur_w].out_of_focus()
+                    self.cur_w += 1
+                    if self.cur_w >= len(Wins):
+                        self.cur_w = 0
+                    Wins[self.cur_w].in_focus()
+
+            elif c == curses.KEY_LEFT:
+                # Previous window
+                if not self.dw:
+                    Wins[self.cur_w].out_of_focus()
+                    if self.cur_w > 0:
+                        self.cur_w -= 1
+                    else:
+                        self.cur_w = len(Wins) - 1
+                    Wins[self.cur_w].in_focus()
+
+            elif c == curses.KEY_RIGHT:
+                # Next window
+                if not self.dw:
+                    Wins[self.cur_w].out_of_focus()
+                    self.cur_w += 1
+                    if self.cur_w >= len(Wins):
+                        self.cur_w = 0
+                    Wins[self.cur_w].in_focus()
+
+            elif c == curses.KEY_F5:
+                if self.dw:
+                    self.dw.reread()
+                else:
+                    Wins[self.cur_w].tail.reread()
+            elif c == curses.KEY_END:
+                if self.dw:
+                    self.dw.end()
+            elif c == curses.KEY_HOME:
+                if self.dw:
+                    self.dw.beggining()
+            elif c == curses.KEY_UP:
+                if self.dw:
+                    self.dw.up()
+            elif c == curses.KEY_DOWN:
+                if self.dw:
+                    self.dw.down()
+            elif c == curses.KEY_NPAGE:
+                if self.dw:
+                    self.dw.pgdown()
+            elif c == curses.KEY_PPAGE:
+                if self.dw:
+                    self.dw.pgup()
+
+inp = InputLoop(curs_lock)
+
+# Fill windows with a content (Tail calls instance per window)
+for win in Wins:
+    try:
+        t = Tail(inp, win, win.filename, True)
+        win.tail = t
+        t.start()
+    except Exception as e:
+        curses.endwin()
+        print("\r\n\r\n\r\nCan't create the tail thread: {}\r\n".format(str(e)))
+        os._exit(1)
+
+if refr_delay:
+    refr_thread = Refresh(refr_delay, inp)
+    refr_thread.start()
+else:
+    for win in Wins:
+        win.auto_refresh = False
+inp.run()
+curses.endwin()
+os._exit(0)
+

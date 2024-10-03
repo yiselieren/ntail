@@ -1,0 +1,38 @@
+# Yes, I know that json standard does not specify comments (WTF?)
+# But ntails reads the file by its own procedure and removes
+# comments before json parsing. The downside - you can't use the "#"
+# symbol in a json - I'm too lazy to implement the real parsing here
+
+# Layout definition
+{
+    #
+    #  Some general parameters
+    # ------------------------
+    #
+    "grid":            "10x10",   # Virtual grid, all coordinates are in the grid from now. The grid is in WxH format
+    "details":         "6x8+3+2", # Details window coordinates (relative to grid), in a WxH+X+Y format
+    "no_line_numbers": true,      # Do not diplay line nubers in "details" window
+    "refr_tmo":        1,         # Delay between auto refreshes (seconds)
+
+    #
+    # Note that all widnow coordinates are in virtual units specified above
+    #
+
+    # Windows definitions:
+    "windows":
+    [
+        {
+            "pos":    "4x10+0+0",      # Position os the window inside grid in a WxH+X+Y format
+            "file":  "Numbers.txt",    # File to display
+            "title": "Title1"          # Title of the window. If not sopecified the file name will be used
+        },
+        {
+            "pos":    "6x5+4+0",
+            "file":   "Utils/help1.txt"
+        },
+        {
+            "pos":    "6x5+4+5",
+            "file":   "Win.py"
+        }
+    ]
+}
