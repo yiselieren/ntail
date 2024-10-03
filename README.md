@@ -23,4 +23,16 @@ Use ntail with -h command line option (**ntail -h**) to get detailed command lin
 ![1](./Images/S1.png)
 
 ### Details window for the selected file
-![1](./Images/S2.png)
+![2](./Images/S2.png)
+
+### Help popup
+![3](./Images/S3.png)
+
+### Goto line in "details" window
+![4](./Images/S4.png)
+
+## Implementation notes
+The **ntail** tool is much simpler then [multitail](https://github.com/folkertvanheusden/multitail), have less features and more flexible and configurable. The **ntail** is implemented using Python so doesn't require compilation and may be used on systems with limited cross compilation possibilties (of course Python and its curses package are required).
+
+And last but not least - I just want to play with curses Python package.
+
