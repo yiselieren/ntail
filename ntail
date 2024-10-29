@@ -207,10 +207,10 @@ if conf_file_mode:
             curses.endwin()
             print("\r\n\r\n\r\nCan't parse config: {}\r\n".format(str(e)))
             os._exit(1)
-        details_h = int((float(details_h) * y_scale) + 0.5)
-        details_w = int((float(details_w) * x_scale) + 0.5)
-        details_y = int((float(details_y) * y_scale) + 0.5)
-        details_x = int((float(details_x) * x_scale) + 0.5)
+        details_h = int(float(details_h) * y_scale)
+        details_w = int(float(details_w) * x_scale)
+        details_y = int(float(details_y) * y_scale)
+        details_x = int(float(details_x) * x_scale)
 
     # Recalculate coordinates
     for win in winlist:
@@ -220,10 +220,10 @@ if conf_file_mode:
             curses.endwin()
             print("\r\n\r\n\r\nCan't parse config: {}\r\n".format(str(e)))
             os._exit(1)
-        win['height'] = int((float(h) * y_scale) + 0.5)
-        win['width']  = int((float(w) * x_scale) + 0.5)
-        win['y']      = int((float(y) * y_scale) + 0.5)
-        win['x']      = int((float(x) * x_scale) + 0.5)
+        win['height'] = int(float(h) * y_scale)
+        win['width']  = int(float(w) * x_scale)
+        win['y']      = int(float(y) * y_scale)
+        win['x']      = int(float(x) * x_scale)
 
     # Other parameters
     if 'refr_tmo' in conf:
@@ -255,10 +255,10 @@ else:
             curses.endwin()
             print("\r\n\r\n\r\nCan't parse config: {}\r\n".format(str(e)))
             os._exit(1)
-        details_h = int((float(details_h) * y_scale) + 0.5)
-        details_w = int((float(details_w) * x_scale) + 0.5)
-        details_y = int((float(details_y) * y_scale) + 0.5)
-        details_x = int((float(details_x) * x_scale) + 0.5)
+        details_h = int(float(details_h) * y_scale)
+        details_w = int(float(details_w) * x_scale)
+        details_y = int(float(details_y) * y_scale)
+        details_x = int(float(details_x) * x_scale)
 
     # Windows
     curses.endwin()
@@ -280,10 +280,10 @@ else:
             os._exit(1)
         win['file'] = s[1]
         win['title'] = s[2] if len(s) > 2 else s[1]
-        win['height'] = int((float(h) * y_scale) + 0.5)
-        win['width']  = int((float(w) * x_scale) + 0.5)
-        win['y']      = int((float(y) * y_scale) + 0.5)
-        win['x']      = int((float(x) * x_scale) + 0.5)
+        win['height'] = int(float(h) * y_scale)
+        win['width']  = int(float(w) * x_scale)
+        win['y']      = int(float(y) * y_scale)
+        win['x']      = int(float(x) * x_scale)
         winlist.append(win)
 
 curses.cbreak();
